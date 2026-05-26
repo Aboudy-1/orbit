@@ -1,0 +1,90 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Satoshi", system-ui, sans-serif;
+
+  --color-accent: #01696f;
+  --color-accent-hover: #015a5f;
+  --color-accent-muted: color-mix(in srgb, #01696f 20%, transparent);
+
+  --color-surface: var(--orbit-surface);
+  --color-surface-raised: var(--orbit-surface-raised);
+  --color-surface-overlay: var(--orbit-surface-overlay);
+  --color-border: var(--orbit-border);
+  --color-border-subtle: var(--orbit-border-subtle);
+  --color-text: var(--orbit-text);
+  --color-text-secondary: var(--orbit-text-secondary);
+  --color-text-muted: var(--orbit-text-muted);
+  --color-danger: #e5484d;
+  --color-success: #30a46c;
+}
+
+:root {
+  color-scheme: dark;
+
+  --orbit-surface: #0a0a0b;
+  --orbit-surface-raised: #141416;
+  --orbit-surface-overlay: #1c1c1f;
+  --orbit-border: #2a2a2e;
+  --orbit-border-subtle: #1f1f22;
+  --orbit-text: #ededef;
+  --orbit-text-secondary: #a1a1aa;
+  --orbit-text-muted: #71717a;
+}
+
+:root.light {
+  color-scheme: light;
+
+  --orbit-surface: #fafafa;
+  --orbit-surface-raised: #ffffff;
+  --orbit-surface-overlay: #f4f4f5;
+  --orbit-border: #e4e4e7;
+  --orbit-border-subtle: #f4f4f5;
+  --orbit-text: #18181b;
+  --orbit-text-secondary: #52525b;
+  --orbit-text-muted: #a1a1aa;
+}
+
+@layer base {
+  *,
+  *::before,
+  *::after {
+    box-sizing: border-box;
+  }
+
+  html {
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  body {
+    margin: 0;
+    min-height: 100dvh;
+    background-color: var(--orbit-surface);
+    color: var(--orbit-text);
+  }
+
+  #root {
+    min-height: 100dvh;
+  }
+
+  h1,
+  h2,
+  h3,
+  h4 {
+    font-weight: 700;
+    letter-spacing: -0.02em;
+  }
+
+  input,
+  button,
+  textarea {
+    font: inherit;
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 2px;
+  }
+}
