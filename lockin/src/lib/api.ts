@@ -106,7 +106,6 @@ export async function fetchFriendActiveSessions(friendIds: string[]) {
     .select('*')
     .in('host_id', friendIds)
     .eq('is_active', true)
-    .not('phase', 'in', '("idle","ended")')
     .order('created_at', { ascending: false })
 
   console.log('[fetchFriendActiveSessions] result:', result.data?.length, 'sessions, error:', result.error)
