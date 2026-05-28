@@ -5,9 +5,12 @@ import {
   fetchSessionMessages,
   joinFocusSession,
   leaveFocusSession,
+  pauseSession,
+  resumeSession,
   sendSessionMessage,
   startSessionTimer,
   syncFocusSessionPhase,
+  syncSessionDurations,
 } from '../lib/api'
 import { supabase } from '../lib/supabase'
 import { getRemainingSeconds } from '../lib/sessionTimer'
@@ -18,6 +21,8 @@ export function useFocusSession(
   userId: string | undefined,
   autoStartBreaks?: boolean,
   autoStartFocus?: boolean,
+  focusDurationMin?: number,
+  breakDurationMin?: number,
 ) {
   const [session, setSession] = useState<FocusSession | null>(null)
   const [participants, setParticipants] = useState<SessionParticipant[]>([])
@@ -31,6 +36,10 @@ export function useFocusSession(
   const syncingRef = useRef(false)
   const syncedDeadlineRef = useRef<string | null>(null)
   const joinedRef = useRef(false)
+
+  // Use profile-based durations (in seconds) when available, falling back to session defaults
+  const focusDurationSec = (focusDurationMin ?? 25) * 60
+  const breakDurationSec = (breakDurationMin ?? 5) * 60
 
   const loadParticipants = useCallback(async (sid: string) => {
     const { data: rows } = await supabase
@@ -109,8 +118,16 @@ export function useFocusSession(
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId, userId])
 
+  // Ref to store the latest loadParticipants function to avoid recreating the subscription
+  const loadParticipantsRef = useRef(loadParticipants)
+  useEffect(() => {
+    loadParticipantsRef.current = loadParticipants
+  }, [loadParticipants])
+
   useEffect(() => {
     if (!sessionId) return
+
+    console.log('[useFocusSession] subscribing to realtime for session:', sessionId)
 
     const channel = supabase
       .channel(`session-${sessionId}`)
@@ -118,6 +135,7 @@ export function useFocusSession(
         'postgres_changes',
         { event: '*', schema: 'public', table: 'focus_sessions', filter: `id=eq.${sessionId}` },
         (payload) => {
+          console.log('[useFocusSession] session change received:', payload.eventType, payload.new)
           if (payload.new) {
             const next = payload.new as FocusSession
             setSession(next)
@@ -133,7 +151,10 @@ export function useFocusSession(
           table: 'session_participants',
           filter: `session_id=eq.${sessionId}`,
         },
-        () => loadParticipants(sessionId),
+        () => {
+          console.log('[useFocusSession] participant change received, reloading')
+          loadParticipantsRef.current(sessionId)
+        },
       )
       .on(
         'postgres_changes',
@@ -144,16 +165,20 @@ export function useFocusSession(
           filter: `session_id=eq.${sessionId}`,
         },
         (payload) => {
+          console.log('[useFocusSession] new message received:', payload)
           const msg = payload.new as SessionMessage
           setMessages((prev) => (prev.some((m) => m.id === msg.id) ? prev : [...prev, msg]))
         },
       )
-      .subscribe()
+      .subscribe((status) => {
+        console.log('[useFocusSession] subscription status:', status)
+      })
 
     return () => {
+      console.log('[useFocusSession] unsubscribing from session:', sessionId)
       supabase.removeChannel(channel)
     }
-  }, [sessionId, loadParticipants])
+  }, [sessionId])
 
   useEffect(() => {
     if (!sessionId || session?.phase !== 'break') return
@@ -199,13 +224,18 @@ export function useFocusSession(
     if (!session || !isHost || session.phase === 'idle' || !session.phase_ends_at) return
     if (remainingSec > 0) return
 
+    // When paused, don't auto-advance
+    if (session.is_paused) return
+
     // If auto-start breaks is enabled and focus just ended, start break automatically
     if (autoStartBreaks && session.phase === 'focus') {
       void (async () => {
+        // Sync durations first so RPC reads correct values
+        await syncSessionDurations(sessionId!, focusDurationSec, breakDurationSec)
         const { data, error: err } = await advanceSessionPhase(
           sessionId!,
           'break',
-          session.break_duration_sec,
+          breakDurationSec,
         )
         if (err) {
           setActionError(err.message)
@@ -222,10 +252,12 @@ export function useFocusSession(
     // If auto-start focus is enabled and break just ended, start focus automatically
     if (autoStartFocus && session.phase === 'break') {
       void (async () => {
+        // Sync durations first so RPC reads correct values
+        await syncSessionDurations(sessionId!, focusDurationSec, breakDurationSec)
         const { data, error: err } = await advanceSessionPhase(
           sessionId!,
           'focus',
-          session.focus_duration_sec,
+          focusDurationSec,
         )
         if (err) {
           setActionError(err.message)
@@ -241,7 +273,7 @@ export function useFocusSession(
 
     // Otherwise sync the phase (for page refresh cases)
     void runHostSync()
-  }, [session, isHost, remainingSec, runHostSync, autoStartBreaks, autoStartFocus, sessionId])
+  }, [session, isHost, remainingSec, runHostSync, autoStartBreaks, autoStartFocus, sessionId, focusDurationSec, breakDurationSec])
 
   const start = useCallback(async () => {
     if (!sessionId || !userId || !session || session.host_id !== userId) return
@@ -249,9 +281,12 @@ export function useFocusSession(
     setActionError(null)
     syncedDeadlineRef.current = null
 
+    // Sync stored durations to match profile preferences before starting
+    await syncSessionDurations(sessionId, focusDurationSec, breakDurationSec)
+
     const { data, error: err } = await startSessionTimer(
       sessionId,
-      session.focus_duration_sec,
+      focusDurationSec,
     )
     setStarting(false)
 
@@ -266,7 +301,7 @@ export function useFocusSession(
     } else {
       await loadSession()
     }
-  }, [sessionId, userId, session, loadSession])
+  }, [sessionId, userId, session, loadSession, focusDurationSec, breakDurationSec])
 
   const end = useCallback(async () => {
     if (!sessionId || !userId || !session || session.host_id !== userId) return
@@ -286,10 +321,13 @@ export function useFocusSession(
     setActionError(null)
     syncedDeadlineRef.current = null
 
+    // Sync stored durations to match profile preferences before starting break
+    await syncSessionDurations(sessionId, focusDurationSec, breakDurationSec)
+
     const { data, error: err } = await advanceSessionPhase(
       sessionId,
       'break',
-      session.break_duration_sec,
+      breakDurationSec,
     )
     if (err) {
       setActionError(err.message)
@@ -302,7 +340,41 @@ export function useFocusSession(
     } else {
       await loadSession()
     }
-  }, [sessionId, userId, session, loadSession])
+  }, [sessionId, userId, session, loadSession, focusDurationSec, breakDurationSec])
+
+  const pause = useCallback(async () => {
+    if (!sessionId || !userId || !session) return
+    if (session.phase === 'idle') return
+    setActionError(null)
+
+    const { data, error: err } = await pauseSession(sessionId)
+    if (err) {
+      setActionError(err.message)
+      return
+    }
+
+    if (data) {
+      setSession(data)
+      setRemainingSec(getRemainingSeconds(data))
+    }
+  }, [sessionId, userId, session])
+
+  const resume = useCallback(async () => {
+    if (!sessionId || !userId || !session) return
+    if (session.phase === 'idle') return
+    setActionError(null)
+
+    const { data, error: err } = await resumeSession(sessionId)
+    if (err) {
+      setActionError(err.message)
+      return
+    }
+
+    if (data) {
+      setSession(data)
+      setRemainingSec(getRemainingSeconds(data))
+    }
+  }, [sessionId, userId, session])
 
   const leave = useCallback(async () => {
     if (!sessionId || !userId) return
@@ -348,6 +420,8 @@ export function useFocusSession(
     end,
     leave,
     sendMessage,
+    pause,
+    resume,
     reload: loadSession,
   }
 }

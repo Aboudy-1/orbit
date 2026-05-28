@@ -13,6 +13,13 @@ export function getRemainingSeconds(session: FocusSession, now = Date.now()): nu
   if (session.phase_ends_at) {
     const ends = Date.parse(session.phase_ends_at)
     if (!Number.isNaN(ends)) {
+      // When paused, freeze the timer at the pause moment
+      if (session.is_paused && session.paused_at) {
+        const pausedAt = Date.parse(session.paused_at)
+        if (!Number.isNaN(pausedAt)) {
+          return Math.max(0, Math.floor((ends - pausedAt) / 1000))
+        }
+      }
       return Math.max(0, Math.floor((ends - now) / 1000))
     }
   }

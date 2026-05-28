@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { respondFriendRequest, searchProfiles, sendFriendRequest } from '../lib/api'
+import { removeFriendship, respondFriendRequest, searchProfiles, sendFriendRequest } from '../lib/api'
 import { supabase } from '../lib/supabase'
 import type { FriendRequest, Friendship, Profile } from '../lib/types'
 
@@ -162,6 +162,31 @@ export function useFriends(userId: string | undefined) {
     [load],
   )
 
+  const removeFriend = useCallback(
+    async (friendId: string) => {
+      if (!userId) return { error: 'Not signed in' }
+
+      // Save the current friend to restore on failure
+      const removedFriend = friends.find((f) => f.friend_id === friendId)
+
+      // Optimistically remove from local state so UI updates instantly
+      setFriends((prev) => prev.filter((f) => f.friend_id !== friendId))
+
+      const { error } = await removeFriendship(userId, friendId)
+      if (error) {
+        console.error('[removeFriend] API error, reverting optimistic update:', error.message)
+        // Revert the optimistic update by restoring the friend
+        setFriends((prev) => {
+          if (prev.some((f) => f.friend_id === friendId)) return prev // already restored by realtime
+          return [...prev, ...(removedFriend ? [removedFriend] : [])]
+        })
+        return { error: error.message }
+      }
+      return { error: null }
+    },
+    [userId, friends],
+  )
+
   return {
     friends,
     incoming,
@@ -171,6 +196,7 @@ export function useFriends(userId: string | undefined) {
     search,
     sendRequest,
     respond,
+    removeFriend,
     reload: load,
   }
 }

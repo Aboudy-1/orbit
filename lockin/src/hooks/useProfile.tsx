@@ -4,6 +4,7 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from 'react'
@@ -27,6 +28,7 @@ export function ProfileProvider({ children }: { children: ReactNode }) {
   const { user } = useAuth()
   const [profile, setProfile] = useState<Profile | null>(null)
   const [loading, setLoading] = useState(true)
+  const fetchedRef = useRef(false)
 
   const refresh = useCallback(async () => {
     if (!user) {
@@ -35,15 +37,29 @@ export function ProfileProvider({ children }: { children: ReactNode }) {
       return
     }
 
-    setLoading(true)
+    // Only show loading on the very first fetch (when user just signed in),
+    // not on subsequent re-fetches, to avoid flickering when navigating
+    if (!fetchedRef.current) setLoading(true)
+
     const p = await ensureProfile(user.id)
     setProfile(p)
-    setLoading(false)
+
+    if (!fetchedRef.current) {
+      fetchedRef.current = true
+      setLoading(false)
+    }
   }, [user])
 
   useEffect(() => {
     refresh()
   }, [refresh])
+
+  // Re-fetch when user changes (sign out → sign in)
+  useEffect(() => {
+    if (user) {
+      fetchedRef.current = false
+    }
+  }, [user])
 
   useEffect(() => {
     if (!user) return

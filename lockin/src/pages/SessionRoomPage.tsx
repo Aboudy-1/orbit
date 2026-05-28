@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
-import { ArrowLeft, Lock, MessageCircle, Send, Settings } from 'lucide-react'
+import { ArrowLeft, Lock, MessageCircle, Send, Settings, SkipForward } from 'lucide-react'
 import Button from '../components/Button'
 import Logo from '../components/Logo'
 import SettingsModal from '../components/SettingsModal'
@@ -9,7 +9,12 @@ import ThemeToggle from '../components/ThemeToggle'
 import { useAuth } from '../hooks/useAuth'
 import { useFocusSession } from '../hooks/useFocusSession'
 import { useProfile } from '../hooks/useProfile'
-import { setAutoStartBreaks, setAutoStartFocus } from '../lib/api'
+import {
+  setAutoStartBreaks,
+  setAutoStartFocus,
+  setFocusDuration,
+  setBreakDuration,
+} from '../lib/api'
 import { formatTimer } from '../lib/sessionTimer'
 import { PHASE_LABELS } from '../lib/types'
 
@@ -26,21 +31,40 @@ export default function SessionRoomPage() {
   const [autoStartFocus, setAutoStartFocusLocal] = useState<boolean>(
     profile?.auto_start_focus ?? true,
   )
+  const [focusDuration, setFocusDurationLocal] = useState<number>(25)
+  const [breakDuration, setBreakDurationLocal] = useState<number>(5)
   const [settingsModalOpen, setSettingsModalOpen] = useState(false)
   const [chatInput, setChatInput] = useState('')
   const [chatError, setChatError] = useState<string | null>(null)
   const [sending, setSending] = useState(false)
   const chatEndRef = useRef<HTMLDivElement>(null)
 
-  // Sync local auto-start state with profile when it loads
+  // Sync local state with profile when it loads or changes
   useEffect(() => {
-    if (profile?.auto_start_breaks !== undefined) {
+    if (!profile) return
+
+    if (profile.auto_start_breaks !== undefined) {
       setAutoStartBreaksLocal(profile.auto_start_breaks)
     }
-    if (profile?.auto_start_focus !== undefined) {
+    if (profile.auto_start_focus !== undefined) {
       setAutoStartFocusLocal(profile.auto_start_focus)
     }
-  }, [profile?.auto_start_breaks, profile?.auto_start_focus])
+    if (profile.focus_duration !== undefined && profile.focus_duration !== null) {
+      setFocusDurationLocal(profile.focus_duration)
+    } else {
+      setFocusDurationLocal(25)
+    }
+    if (profile.break_duration !== undefined && profile.break_duration !== null) {
+      setBreakDurationLocal(profile.break_duration)
+    } else {
+      setBreakDurationLocal(5)
+    }
+  }, [
+    profile?.auto_start_breaks,
+    profile?.auto_start_focus,
+    profile?.focus_duration,
+    profile?.break_duration,
+  ])
 
   const {
     session,
@@ -58,7 +82,9 @@ export default function SessionRoomPage() {
     end,
     leave,
     sendMessage,
-  } = useFocusSession(id, user?.id, autoStartBreaks, autoStartFocus)
+    pause,
+    resume,
+  } = useFocusSession(id, user?.id, autoStartBreaks, autoStartFocus, focusDuration, breakDuration)
 
   const chatEnabled = session?.phase !== 'focus'
 
@@ -106,6 +132,27 @@ export default function SessionRoomPage() {
     setAutoStartFocus(user.id, newValue)
   }
 
+  function handleFocusDurationChange(minutes: number) {
+    if (!user) return
+    setFocusDurationLocal(minutes)
+    setFocusDuration(user.id, minutes)
+  }
+
+  function handleBreakDurationChange(minutes: number) {
+    if (!user) return
+    setBreakDurationLocal(minutes)
+    setBreakDuration(user.id, minutes)
+  }
+
+  async function handleSkip() {
+    if (!isHost || !session || !id || !user) return
+    if (session.phase === 'focus') {
+      await startBreak()
+    } else if (session.phase === 'break') {
+      await start()
+    }
+  }
+
   if (loading) {
     return (
       <div className="flex min-h-dvh items-center justify-center">
@@ -131,6 +178,14 @@ export default function SessionRoomPage() {
         <Logo size="sm" />
         <div className="flex items-center gap-2">
           <ThemeToggle />
+          <button
+            type="button"
+            onClick={() => setSettingsModalOpen(true)}
+            className="rounded-lg p-2 text-text-secondary transition-colors hover:bg-surface-overlay hover:text-text"
+            aria-label="Open pomodoro settings"
+          >
+            <Settings size={18} />
+          </button>
           <Button variant="ghost" onClick={handleLeave}>
             <ArrowLeft size={16} />
             Leave
@@ -188,17 +243,28 @@ export default function SessionRoomPage() {
             </div>
           )}
 
-          {/* Settings gear icon — visible to all participants */}
-          <div className="mt-6 flex items-center gap-2">
+          {/* Pause/Resume — visible to everyone when timer is running */}
+          {session.phase !== 'idle' && (
             <button
               type="button"
-              onClick={() => setSettingsModalOpen(true)}
-              className="rounded-lg p-2 text-text-secondary transition-colors hover:bg-surface-overlay hover:text-text"
-              aria-label="Open pomodoro settings"
+              onClick={() => void (session.is_paused ? resume() : pause())}
+              className="mt-3 rounded-lg border border-border bg-surface-overlay px-4 py-2 text-sm font-medium text-text transition-colors hover:bg-surface-raised"
             >
-              <Settings size={18} />
+              {session.is_paused ? 'Resume' : 'Pause'}
             </button>
-          </div>
+          )}
+
+          {/* Skip button — visible to host when timer is running */}
+          {isHost && session.phase !== 'idle' && (
+            <button
+              type="button"
+              onClick={() => void handleSkip()}
+              className="mt-3 flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium text-text-secondary transition-colors hover:bg-surface-overlay hover:text-text"
+            >
+              <SkipForward size={14} />
+              Skip
+            </button>
+          )}
         </div>
 
         <div className="flex w-full flex-col gap-6 lg:w-80">
@@ -283,8 +349,12 @@ export default function SessionRoomPage() {
         onClose={() => setSettingsModalOpen(false)}
         autoStartBreaks={autoStartBreaks}
         autoStartFocus={autoStartFocus}
+        focusDuration={focusDuration}
+        breakDuration={breakDuration}
         onToggleAutoStartBreaks={handleToggleAutoStartBreaks}
         onToggleAutoStartFocus={handleToggleAutoStartFocus}
+        onFocusDurationChange={handleFocusDurationChange}
+        onBreakDurationChange={handleBreakDurationChange}
       />
     </div>
   )

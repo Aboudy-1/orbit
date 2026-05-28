@@ -23,6 +23,8 @@ export type Profile = {
   current_session_id: string | null
   auto_start_breaks: boolean
   auto_start_focus: boolean
+  focus_duration: number
+  break_duration: number
   created_at: string
   updated_at: string
 }
@@ -37,6 +39,8 @@ export type FocusSession = {
   phase_started_at: string | null
   phase_ends_at: string | null
   is_active: boolean
+  is_paused: boolean
+  paused_at: string | null
   created_at: string
 }
 
@@ -71,4 +75,15 @@ export type SessionMessage = {
   content: string
   created_at: string
   profile?: Profile
+}
+
+export type DirectMessage = {
+  id: string
+  sender_id: string
+  receiver_id: string
+  content: string
+  created_at: string
+  read_at: string | null
+  sender?: Profile
+  receiver?: Profile
 }

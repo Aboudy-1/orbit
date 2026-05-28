@@ -51,22 +51,70 @@ export function useFriendActiveSessions(friendIds: string[]) {
     load()
   }, [load])
 
+  // Smart realtime handler: removes ended sessions immediately from local state
+  // (optimistic update), then does a full re-fetch for consistency.
+  const handleRealtimeEvent = useCallback(
+    (payload: { eventType: string; new: Record<string, unknown> | null; old: Record<string, unknown> | null }) => {
+      console.log('[useFriendActiveSessions] realtime payload received:', payload.eventType, payload.new)
+
+      const { eventType, new: newData, old: oldData } = payload
+
+      // DELETE — remove the session immediately
+      if (eventType === 'DELETE') {
+        const deletedId = (oldData as { id?: string })?.id
+        if (deletedId) {
+          console.log('[useFriendActiveSessions] DELETE event, removing session:', deletedId)
+          setSessions((prev) => prev.filter((s) => s.id !== deletedId))
+        }
+        return
+      }
+
+      // INSERT — do a full re-fetch to pick up the new session
+      if (eventType === 'INSERT') {
+        load()
+        return
+      }
+
+      // UPDATE — check if the session ended; if so, remove it immediately
+      if (eventType === 'UPDATE') {
+        const updated = newData as Partial<FocusSession> | null
+        if (updated?.id) {
+          const sessionEnded = updated.is_active === false || updated.phase === 'idle'
+          if (sessionEnded) {
+            console.log('[useFriendActiveSessions] UPDATE event, session ended, removing:', updated.id)
+            setSessions((prev) => prev.filter((s) => s.id !== updated.id))
+            return
+          }
+        }
+      }
+
+      // Fallback: full re-fetch for other cases
+      load()
+    },
+    [load],
+  )
+
   useEffect(() => {
     if (!friendIds.length) return
+
+    console.log('[useFriendActiveSessions] subscribing to realtime changes for friend sessions')
 
     const channel = supabase
       .channel('friend-active-sessions')
       .on(
         'postgres_changes',
         { event: '*', schema: 'public', table: 'focus_sessions' },
-        () => load(),
+        (payload) => handleRealtimeEvent(payload),
       )
-      .subscribe()
+      .subscribe((status) => {
+        console.log('[useFriendActiveSessions] subscription status:', status)
+      })
 
     return () => {
+      console.log('[useFriendActiveSessions] unsubscribing')
       supabase.removeChannel(channel)
     }
-  }, [friendIds, load])
+  }, [friendIds, handleRealtimeEvent])
 
   return { sessions, loading, reload: load }
 }
