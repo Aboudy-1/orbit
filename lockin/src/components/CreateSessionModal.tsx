@@ -1,7 +1,8 @@
-import { useRef, useState, type FormEvent } from 'react'
+import { useEffect, useRef, useState, type FormEvent } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { X } from 'lucide-react'
-import { createFocusSession } from '../lib/api'
+import { createFocusSession, setBreakDuration, setFocusDuration } from '../lib/api'
+import { useProfile } from '../hooks/useProfile'
 import Button from './Button'
 import Input from './Input'
 
@@ -13,12 +14,22 @@ type CreateSessionModalProps = {
 
 export default function CreateSessionModal({ open, onClose, hostId }: CreateSessionModalProps) {
   const navigate = useNavigate()
+  const { profile } = useProfile()
   const [title, setTitle] = useState('')
-  const [focusMin, setFocusMin] = useState(25)
-  const [breakMin, setBreakMin] = useState(5)
+  const [focusMin, setFocusMin] = useState(profile?.focus_duration ?? 25)
+  const [breakMin, setBreakMin] = useState(profile?.break_duration ?? 5)
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const creatingRef = useRef(false)
+
+  // Sync the menu's duration inputs with the user's saved settings so creation
+  // defaults match the last persisted choice (available even after a refresh,
+  // since the profile is loaded before the dashboard is interactive).
+  useEffect(() => {
+    if (!open) return
+    setFocusMin(profile?.focus_duration ?? 25)
+    setBreakMin(profile?.break_duration ?? 5)
+  }, [open, profile?.focus_duration, profile?.break_duration])
 
   if (!open) return null
 
@@ -28,6 +39,14 @@ export default function CreateSessionModal({ open, onClose, hostId }: CreateSess
     creatingRef.current = true
     setSubmitting(true)
     setError(null)
+
+    // Persist the menu's selected durations to the user's saved settings BEFORE
+    // creating/starting the session, so the running session and the persisted
+    // settings are always in sync with the latest menu choice. Awaiting these
+    // writes guarantees the profile is updated before the session room loads,
+    // preventing a race where a stale saved value is read at session start.
+    await setFocusDuration(hostId, focusMin)
+    await setBreakDuration(hostId, breakMin)
 
     const { session, error: err } = await createFocusSession(hostId, focusMin, breakMin, title)
     creatingRef.current = false
