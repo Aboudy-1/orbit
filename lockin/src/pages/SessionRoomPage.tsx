@@ -9,13 +9,13 @@ import ThemeToggle from '../components/ThemeToggle'
 import { useAuth } from '../hooks/useAuth'
 import { useFocusSession } from '../hooks/useFocusSession'
 import { useProfile } from '../hooks/useProfile'
-import {
-  setAutoStartBreaks,
-  setAutoStartFocus,
-  setFocusDuration,
-  setBreakDuration,
-} from '../lib/api'
+import { useTimerSettings } from '../hooks/useTimerSettings'
 import { formatTimer } from '../lib/sessionTimer'
+import {
+  playTimerSound,
+  requestNotificationPermission,
+  sendTimerNotification,
+} from '../lib/timerSounds'
 import { PHASE_LABELS } from '../lib/types'
 
 export default function SessionRoomPage() {
@@ -24,47 +24,44 @@ export default function SessionRoomPage() {
   const { profile } = useProfile()
   const navigate = useNavigate()
 
-  // Auto-start settings — defaults from profile, synced when profile loads
-  const [autoStartBreaks, setAutoStartBreaksLocal] = useState<boolean>(
-    profile?.auto_start_breaks ?? true,
-  )
-  const [autoStartFocus, setAutoStartFocusLocal] = useState<boolean>(
-    profile?.auto_start_focus ?? true,
-  )
-  const [focusDuration, setFocusDurationLocal] = useState<number>(25)
-  const [breakDuration, setBreakDurationLocal] = useState<number>(5)
   const [settingsModalOpen, setSettingsModalOpen] = useState(false)
   const [chatInput, setChatInput] = useState('')
   const [chatError, setChatError] = useState<string | null>(null)
   const [sending, setSending] = useState(false)
   const chatEndRef = useRef<HTMLDivElement>(null)
+  const customAudioRef = useRef<HTMLAudioElement | null>(null)
+  const prevRemainingRef = useRef<number>(0)
+  const soundPlayedRef = useRef(false)
+  const stopOnClickRef = useRef<(() => void) | null>(null)
 
-  // Sync local state with profile when it loads or changes
+  const {
+    autoStartBreaks,
+    autoStartFocus,
+    focusDuration,
+    breakDuration,
+    timerSound,
+    timerVolume,
+    customSoundUrl,
+    handleToggleAutoStartBreaks,
+    handleToggleAutoStartFocus,
+    handleFocusDurationChange,
+    handleBreakDurationChange,
+    handleTimerSoundChange,
+    handleTimerVolumeChange,
+    handleCustomSoundUpload,
+    handleRemoveCustomSound,
+  } = useTimerSettings(user?.id)
+
+  // Create/update Audio element when custom sound URL changes
   useEffect(() => {
-    if (!profile) return
-
-    if (profile.auto_start_breaks !== undefined) {
-      setAutoStartBreaksLocal(profile.auto_start_breaks)
-    }
-    if (profile.auto_start_focus !== undefined) {
-      setAutoStartFocusLocal(profile.auto_start_focus)
-    }
-    if (profile.focus_duration !== undefined && profile.focus_duration !== null) {
-      setFocusDurationLocal(profile.focus_duration)
+    if (customSoundUrl) {
+      const audio = new Audio(customSoundUrl)
+      audio.volume = timerVolume / 100
+      customAudioRef.current = audio
     } else {
-      setFocusDurationLocal(25)
+      customAudioRef.current = null
     }
-    if (profile.break_duration !== undefined && profile.break_duration !== null) {
-      setBreakDurationLocal(profile.break_duration)
-    } else {
-      setBreakDurationLocal(5)
-    }
-  }, [
-    profile?.auto_start_breaks,
-    profile?.auto_start_focus,
-    profile?.focus_duration,
-    profile?.break_duration,
-  ])
+  }, [customSoundUrl, timerVolume])
 
   const {
     session,
@@ -101,6 +98,75 @@ export default function SessionRoomPage() {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages])
 
+  // Request notification permission on first settings open
+  useEffect(() => {
+    if (settingsModalOpen) {
+      requestNotificationPermission()
+    }
+  }, [settingsModalOpen])
+
+  // Clean up click listener on unmount
+  useEffect(() => {
+    return () => {
+      if (stopOnClickRef.current) {
+        document.removeEventListener('click', stopOnClickRef.current)
+        stopOnClickRef.current = null
+      }
+    }
+  }, [])
+
+  // Play alert sound when timer hits 0
+  useEffect(() => {
+    if (!session || session.phase === 'idle' || session.is_paused) {
+      prevRemainingRef.current = remainingSec
+      return
+    }
+
+    const prev = prevRemainingRef.current
+    prevRemainingRef.current = remainingSec
+
+    // Detect transition from positive to zero
+    if (prev > 0 && remainingSec === 0) {
+      if (!soundPlayedRef.current) {
+        soundPlayedRef.current = true
+
+        // Play the custom sound if uploaded, otherwise the built-in sound
+        if (customSoundUrl && customAudioRef.current) {
+          try {
+            customAudioRef.current.currentTime = 0
+            customAudioRef.current.volume = timerVolume / 100
+            customAudioRef.current.play().catch((err) =>
+              console.error('[SessionRoom] Failed to play custom sound:', err),
+            )
+          } catch (err) {
+            console.error('[SessionRoom] Custom sound play error:', err)
+          }
+        } else {
+          playTimerSound(timerSound, timerVolume / 100)
+        }
+
+        // Send browser notification as fallback
+        sendTimerNotification(session.phase)
+
+        // Add one-time click listener to stop the ringtone on any screen click
+        stopOnClickRef.current = () => {
+          if (customAudioRef.current) {
+            customAudioRef.current.pause()
+            customAudioRef.current.currentTime = 0
+          }
+          document.removeEventListener('click', stopOnClickRef.current!)
+          stopOnClickRef.current = null
+        }
+        document.addEventListener('click', stopOnClickRef.current)
+      }
+    }
+
+    // Reset the sound played flag when timer starts again
+    if (remainingSec > 0) {
+      soundPlayedRef.current = false
+    }
+  }, [remainingSec, session?.phase, session?.is_paused, timerSound, timerVolume, customSoundUrl, session])
+
   async function handleLeave() {
     await leave()
     navigate('/')
@@ -115,33 +181,6 @@ export default function SessionRoomPage() {
     setSending(false)
     if (err) setChatError(err)
     else setChatInput('')
-  }
-
-  // Optimistic toggles: update local state immediately, save to Supabase in background
-  function handleToggleAutoStartBreaks() {
-    if (!user) return
-    const newValue = !autoStartBreaks
-    setAutoStartBreaksLocal(newValue)
-    setAutoStartBreaks(user.id, newValue)
-  }
-
-  function handleToggleAutoStartFocus() {
-    if (!user) return
-    const newValue = !autoStartFocus
-    setAutoStartFocusLocal(newValue)
-    setAutoStartFocus(user.id, newValue)
-  }
-
-  function handleFocusDurationChange(minutes: number) {
-    if (!user) return
-    setFocusDurationLocal(minutes)
-    setFocusDuration(user.id, minutes)
-  }
-
-  function handleBreakDurationChange(minutes: number) {
-    if (!user) return
-    setBreakDurationLocal(minutes)
-    setBreakDuration(user.id, minutes)
   }
 
   async function handleSkip() {
@@ -234,7 +273,6 @@ export default function SessionRoomPage() {
                   End session
                 </Button>
               )}
-              {/* Show Start Break button when auto-start is OFF and focus has ended */}
               {!autoStartBreaks && focusEnded && (
                 <Button onClick={() => void startBreak()} disabled={starting}>
                   {starting ? 'Starting…' : 'Start Break'}
@@ -243,8 +281,8 @@ export default function SessionRoomPage() {
             </div>
           )}
 
-          {/* Pause/Resume — visible to everyone when timer is running */}
-          {session.phase !== 'idle' && (
+          {/* Pause/Resume — only visible to the host */}
+          {isHost && session.phase !== 'idle' && (
             <button
               type="button"
               onClick={() => void (session.is_paused ? resume() : pause())}
@@ -351,10 +389,18 @@ export default function SessionRoomPage() {
         autoStartFocus={autoStartFocus}
         focusDuration={focusDuration}
         breakDuration={breakDuration}
+        timerSound={timerSound}
+        timerVolume={timerVolume}
+        hasCustomSound={!!customSoundUrl}
+        customRingtoneUrl={customSoundUrl}
         onToggleAutoStartBreaks={handleToggleAutoStartBreaks}
         onToggleAutoStartFocus={handleToggleAutoStartFocus}
         onFocusDurationChange={handleFocusDurationChange}
         onBreakDurationChange={handleBreakDurationChange}
+        onTimerSoundChange={handleTimerSoundChange}
+        onTimerVolumeChange={handleTimerVolumeChange}
+        onCustomSoundUpload={handleCustomSoundUpload}
+        onRemoveCustomSound={handleRemoveCustomSound}
       />
     </div>
   )

@@ -1,9 +1,12 @@
+import { useState } from 'react'
 import { Link } from 'react-router-dom'
-import { LogOut, Users } from 'lucide-react'
+import { LogOut, Settings, Users } from 'lucide-react'
 import { useAuth } from '../hooks/useAuth'
 import { useProfile } from '../hooks/useProfile'
+import { useTimerSettings } from '../hooks/useTimerSettings'
 import Button from './Button'
 import Logo from './Logo'
+import SettingsModal from './SettingsModal'
 import StatusBadge from './StatusBadge'
 import ThemeToggle from './ThemeToggle'
 
@@ -21,8 +24,11 @@ const widthClass = {
 }
 
 export default function AppShell({ children, maxWidth = '2xl' }: AppShellProps) {
-  const { signOut } = useAuth()
+  const { user, signOut } = useAuth()
   const { profile } = useProfile()
+  const [settingsOpen, setSettingsOpen] = useState(false)
+
+  const timerSettings = useTimerSettings(user?.id)
 
   return (
     <div className="min-h-dvh">
@@ -43,6 +49,14 @@ export default function AppShell({ children, maxWidth = '2xl' }: AppShellProps) 
           >
             <Users size={18} />
           </Link>
+          <button
+            type="button"
+            onClick={() => setSettingsOpen(true)}
+            className="rounded-lg p-2 text-text-secondary transition-colors hover:bg-surface-overlay hover:text-text"
+            aria-label="Settings"
+          >
+            <Settings size={18} />
+          </button>
           <ThemeToggle />
           <Button variant="ghost" onClick={() => signOut()} aria-label="Sign out">
             <LogOut size={18} />
@@ -50,6 +64,27 @@ export default function AppShell({ children, maxWidth = '2xl' }: AppShellProps) 
         </div>
       </header>
       <main className={`mx-auto px-6 py-10 ${widthClass[maxWidth]}`}>{children}</main>
+
+      <SettingsModal
+        open={settingsOpen}
+        onClose={() => setSettingsOpen(false)}
+        autoStartBreaks={timerSettings.autoStartBreaks}
+        autoStartFocus={timerSettings.autoStartFocus}
+        focusDuration={timerSettings.focusDuration}
+        breakDuration={timerSettings.breakDuration}
+        timerSound={timerSettings.timerSound}
+        timerVolume={timerSettings.timerVolume}
+        hasCustomSound={!!timerSettings.customSoundUrl}
+        customRingtoneUrl={timerSettings.customSoundUrl}
+        onToggleAutoStartBreaks={timerSettings.handleToggleAutoStartBreaks}
+        onToggleAutoStartFocus={timerSettings.handleToggleAutoStartFocus}
+        onFocusDurationChange={timerSettings.handleFocusDurationChange}
+        onBreakDurationChange={timerSettings.handleBreakDurationChange}
+        onTimerSoundChange={timerSettings.handleTimerSoundChange}
+        onTimerVolumeChange={timerSettings.handleTimerVolumeChange}
+        onCustomSoundUpload={timerSettings.handleCustomSoundUpload}
+        onRemoveCustomSound={timerSettings.handleRemoveCustomSound}
+      />
     </div>
   )
 }

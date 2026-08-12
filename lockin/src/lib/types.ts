@@ -15,6 +15,17 @@ export const PHASE_LABELS: Record<SessionPhase, string> = {
   break: 'Break',
 }
 
+export type TimerSound = 'bell' | 'chime' | 'digital' | 'gentle' | 'custom' | 'none'
+
+export const TIMER_SOUND_LABELS: Record<TimerSound, string> = {
+  bell: 'Bell',
+  chime: 'Chime',
+  digital: 'Digital Beep',
+  gentle: 'Gentle Alarm',
+  custom: 'Custom',
+  none: 'None (Silent)',
+}
+
 export type Profile = {
   id: string
   username: string | null
@@ -25,6 +36,8 @@ export type Profile = {
   auto_start_focus: boolean
   focus_duration: number
   break_duration: number
+  timer_sound: TimerSound
+  timer_volume: number
   created_at: string
   updated_at: string
 }

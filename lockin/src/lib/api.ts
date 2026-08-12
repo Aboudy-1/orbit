@@ -1,5 +1,5 @@
 import { supabase } from './supabase'
-import type { DirectMessage, FocusSession, Profile, SessionMessage } from './types'
+import type { DirectMessage, FocusSession, Profile, SessionMessage, TimerSound } from './types'
 
 export async function ensureProfile(userId: string): Promise<Profile | null> {
   const { data } = await supabase.from('profiles').select('*').eq('id', userId).maybeSingle()
@@ -45,6 +45,19 @@ export async function setFocusDuration(userId: string, minutes: number) {
 export async function setBreakDuration(userId: string, minutes: number) {
   const { error } = await supabase.from('profiles').update({ break_duration: minutes }).eq('id', userId)
   if (error) console.error('[setBreakDuration] Supabase update failed:', error.message, error)
+  return { error }
+}
+
+export async function setTimerSound(userId: string, sound: TimerSound) {
+  const { error } = await supabase.from('profiles').update({ timer_sound: sound }).eq('id', userId)
+  if (error) console.error('[setTimerSound] Supabase update failed:', error.message, error)
+  return { error }
+}
+
+export async function setTimerVolume(userId: string, volume: number) {
+  const clamped = Math.max(0, Math.min(100, volume))
+  const { error } = await supabase.from('profiles').update({ timer_volume: clamped }).eq('id', userId)
+  if (error) console.error('[setTimerVolume] Supabase update failed:', error.message, error)
   return { error }
 }
 
