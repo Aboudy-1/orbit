@@ -9,6 +9,11 @@ export default defineConfig({
     tailwindcss(),
     VitePWA({
       registerType: "autoUpdate",
+      // The app registers the service worker itself in src/main.tsx via
+      // registerSW({ immediate: true }) so the autoUpdate reload flow is
+      // wired up. Disable the plugin's default bare registerSW.js injection
+      // to avoid registering /sw.js twice and to drop the non-reloading stub.
+      injectRegister: false,
       includeAssets: ["orbit.svg", "icons/*.png"],
       manifest: {
         name: "Orbit",
@@ -38,6 +43,14 @@ export default defineConfig({
         ],
       },
       workbox: {
+        // Because injectRegister is disabled (we register manually via the
+        // virtual:pwa-register client so the autoUpdate reload flow runs),
+        // vite-plugin-pwa won't force these for us — set them explicitly so
+        // the newly deployed service worker skip-waits and claims clients.
+        // Combined with registerSW({ immediate: true }) in src/main.tsx, the
+        // page reloads the moment the new build activates.
+        skipWaiting: true,
+        clientsClaim: true,
         globPatterns: ["**/*.{js,css,html,svg,png,ico,woff2}"],
         runtimeCaching: [
           {
