@@ -32,6 +32,13 @@ export function useFocusSession(
   const [participants, setParticipants] = useState<SessionParticipant[]>([])
   const [messages, setMessages] = useState<SessionMessage[]>([])
   /**
+   * Whether the chat panel shows messages from earlier breaks in this session
+   * ("Show previous breaks"). Pure display filter — nothing is deleted, and
+   * the default (false) shows only the current break's messages so each new
+   * break starts with an empty chat.
+   */
+  const [showPreviousBreaks, setShowPreviousBreaks] = useState(false)
+  /**
    * Per-user "clear chat for me" watermark. Messages at/below it are hidden from
    * this user's view only — nothing is deleted, other participants keep the
    * full history.
@@ -474,20 +481,75 @@ export function useFocusSession(
   )
 
   /**
-   * Messages visible to this user, i.e. everything newer than their own
-   * "clear chat for me" watermark.
+   * Messages visible to this user: everything newer than their own
+   * "clear chat for me" watermark, and — unless "show previous breaks" is
+   * on — only messages from the latest break. During a break that means the
+   * running break (persisted break_started_at tag matching the session's
+   * phase_started_at, so the reset boundary survives refreshes, late joins
+   * and realtime reconnects); during focus the panel stays visible but shows
+   * only the most recent break's messages (max break_started_at tag), never
+   * the accumulated full history. Timestamps are compared as epoch ms; a few
+   * ms of clock skew would only matter if two breaks started in the same
+   * millisecond.
    */
   const visibleMessages = useMemo(() => {
-    if (!clearedAt) return messages
-    const watermark = Date.parse(clearedAt)
-    if (Number.isNaN(watermark)) return messages
-    return messages.filter((m) => Date.parse(m.created_at) > watermark)
-  }, [messages, clearedAt])
+    let filtered = messages
+    if (clearedAt) {
+      const watermark = Date.parse(clearedAt)
+      if (!Number.isNaN(watermark)) {
+        filtered = filtered.filter((m) => Date.parse(m.created_at) > watermark)
+      }
+    }
+    if (!showPreviousBreaks && (session?.phase === 'break' || session?.phase === 'focus')) {
+      // If NO message carries the tag yet (migration not run), don't filter —
+      // otherwise every break would look empty with no way to recover.
+      const anyTagged = filtered.some((m) => !!m.break_started_at)
+      if (anyTagged) {
+        if (session?.phase === 'break' && session.phase_started_at) {
+          const currentBreak = Date.parse(session.phase_started_at)
+          if (!Number.isNaN(currentBreak)) {
+            filtered = filtered.filter((m) => {
+              if (!m.break_started_at) return false
+              return Date.parse(m.break_started_at) === currentBreak
+            })
+          }
+        } else if (session?.phase === 'focus') {
+          // No live break boundary during focus — fall back to the most
+          // recent break tag present in this session's messages.
+          let latestBreak = Number.NEGATIVE_INFINITY
+          for (const m of filtered) {
+            if (!m.break_started_at) continue
+            const t = Date.parse(m.break_started_at)
+            if (!Number.isNaN(t) && t > latestBreak) latestBreak = t
+          }
+          if (latestBreak > Number.NEGATIVE_INFINITY) {
+            filtered = filtered.filter(
+              (m) => !!m.break_started_at && Date.parse(m.break_started_at) === latestBreak,
+            )
+          }
+        }
+      }
+    }
+    return filtered
+  }, [messages, clearedAt, showPreviousBreaks, session?.phase, session?.phase_started_at])
+
+  // A new break phase means a fresh chat: collapse back to "current break
+  // only" so leftover messages from the prior break disappear from view
+  // (they are NOT deleted — "show previous breaks" still reveals them).
+  useEffect(() => {
+    if (session?.phase === 'break' && session.phase_started_at) {
+      setShowPreviousBreaks(false)
+    }
+  }, [session?.phase, session?.phase_started_at])
 
   return {
     session,
     participants,
     messages: visibleMessages,
+    /** All messages in this session (current + previous breaks), for counts. */
+    allMessages: messages,
+    showPreviousBreaks,
+    setShowPreviousBreaks,
     profileMap,
     remainingSec,
     loading,

@@ -89,6 +89,8 @@ export type SessionMessage = {
   user_id: string
   content: string
   created_at: string
+  /** Start of the break this message was sent in (null = sent outside a break). */
+  break_started_at: string | null
   profile?: Profile
 }
 

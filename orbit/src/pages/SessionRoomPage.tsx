@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
-import { ArrowLeft, Lock, MessageCircle, Minimize2, Send, Settings, SkipForward, Trash2 } from 'lucide-react'
+import { ArrowLeft, ChevronDown, ChevronUp, History, Lock, MessageCircle, Send, Settings, SkipForward, Trash2 } from 'lucide-react'
 import Button from '../components/Button'
 import Logo from '../components/Logo'
 import SettingsModal from '../components/SettingsModal'
@@ -33,15 +33,21 @@ export default function SessionRoomPage() {
   const [chatInput, setChatInput] = useState('')
   const [chatError, setChatError] = useState<string | null>(null)
   const [sending, setSending] = useState(false)
-  /** Pure UI toggle — collapses the break chat to free up space. */
-  const [chatHidden, setChatHidden] = useState(false)
   /** "Clear chat for me" confirmation step. */
   const [confirmingClear, setConfirmingClear] = useState(false)
   const [clearing, setClearing] = useState(false)
   /** "Delete chat for everyone" (host / allowed controllers) confirmation step. */
   const [confirmingDelete, setConfirmingDelete] = useState(false)
   const [deleting, setDeleting] = useState(false)
+  /**
+   * Visual collapse/expand of the break chat panel. Purely local UI state —
+   * nothing is hidden from the server and nothing is deleted. Distinct from
+   * "show previous breaks" (which reveals older history) and "delete chat
+   * for everyone" (which permanently removes messages).
+   */
+  const [chatCollapsed, setChatCollapsed] = useState(false)
   const chatEndRef = useRef<HTMLDivElement>(null)
+  const chatScrollRef = useRef<HTMLDivElement>(null)
   const chatInputRef = useRef<HTMLInputElement>(null)
   const customAudioRef = useRef<HTMLAudioElement | null>(null)
   const prevRemainingRef = useRef<number>(0)
@@ -172,6 +178,9 @@ export default function SessionRoomPage() {
     session,
     participants,
     messages,
+    allMessages,
+    showPreviousBreaks,
+    setShowPreviousBreaks,
     profileMap,
     remainingSec,
     loading,
@@ -205,8 +214,10 @@ export default function SessionRoomPage() {
   }, [session, navigate])
 
   useEffect(() => {
-    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [messages])
+    // Scroll inside the fixed-height chat box (not the whole page) so new
+    // messages push older ones up within the box.
+    chatScrollRef.current?.scrollTo({ top: chatScrollRef.current.scrollHeight, behavior: 'smooth' })
+  }, [messages, chatCollapsed])
 
   // Keep the browser tab title in sync with the running timer so the remaining
   // time is visible even when the user is on another tab. Resets to the normal
@@ -469,63 +480,67 @@ export default function SessionRoomPage() {
             </ul>
           </section>
 
-          {chatHidden ? (
-            <section className="rounded-lg border border-border-subtle">
-              <button
-                type="button"
-                onClick={() => setChatHidden(false)}
-                className="flex w-full items-center gap-2 px-4 py-3 text-sm font-medium text-text-secondary transition-colors hover:bg-surface-overlay hover:text-text"
-              >
-                <MessageCircle size={16} />
-                Break chat hidden — show chat
-              </button>
-            </section>
-          ) : (
-            <section className="flex min-h-64 flex-1 flex-col rounded-lg border border-border-subtle">
-              <div className="flex items-center gap-2 border-b border-border-subtle px-4 py-3">
-                <MessageCircle size={16} className="text-text-secondary" />
-                <h2 className="text-sm font-medium text-text-secondary">Break chat</h2>
-                {!chatEnabled && <Lock size={14} className="text-text-muted" />}
-                <div className="ml-auto flex items-center gap-1">
+          <section className="flex min-h-0 flex-col rounded-lg border border-border-subtle">
+            <div className="flex items-center gap-2 border-b border-border-subtle px-4 py-3">
+              <MessageCircle size={16} className="text-text-secondary" />
+              <h2 className="text-sm font-medium text-text-secondary">Break chat</h2>
+              {!chatEnabled && <Lock size={14} className="text-text-muted" />}
+              {chatCollapsed && messages.length > 0 && (
+                <span className="text-xs tabular-nums text-text-muted">
+                  {messages.length} {messages.length === 1 ? 'message' : 'messages'}
+                </span>
+              )}
+              <div className="ml-auto flex items-center gap-1">
+                <button
+                  type="button"
+                  onClick={() => setConfirmingClear((prev) => !prev)}
+                  className={`rounded-md p-1.5 transition-colors hover:bg-surface-overlay ${
+                    confirmingClear ? 'text-danger' : 'text-text-secondary hover:text-text'
+                  }`}
+                  aria-label="Clear chat for me"
+                  title="Clear chat for me (other participants keep the history)"
+                >
+                  <Trash2 size={14} />
+                </button>
+                {canControl && (
                   <button
                     type="button"
-                    onClick={() => setConfirmingClear((prev) => !prev)}
+                    onClick={() => {
+                      setConfirmingDelete((prev) => !prev)
+                      setConfirmingClear(false)
+                    }}
                     className={`rounded-md p-1.5 transition-colors hover:bg-surface-overlay ${
-                      confirmingClear ? 'text-danger' : 'text-text-secondary hover:text-text'
+                      confirmingDelete ? 'text-danger' : 'text-text-secondary hover:text-text'
                     }`}
-                    aria-label="Clear chat for me"
-                    title="Clear chat for me (other participants keep the history)"
+                    aria-label="Delete chat for everyone"
+                    title="Delete chat for everyone (permanent — removes it for all participants)"
                   >
-                    <Trash2 size={14} />
+                    <Trash2 size={14} className="text-danger" />
                   </button>
-                  {canControl && (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setConfirmingDelete((prev) => !prev)
-                        setConfirmingClear(false)
-                      }}
-                      className={`rounded-md p-1.5 transition-colors hover:bg-surface-overlay ${
-                        confirmingDelete ? 'text-danger' : 'text-text-secondary hover:text-text'
-                      }`}
-                      aria-label="Delete chat for everyone"
-                      title="Delete chat for everyone (permanent — removes it for all participants)"
-                    >
-                      <Trash2 size={14} className="text-danger" />
-                    </button>
-                  )}
-                  <button
-                    type="button"
-                    onClick={() => setChatHidden(true)}
-                    className="rounded-md p-1.5 text-text-secondary transition-colors hover:bg-surface-overlay hover:text-text"
-                    aria-label="Hide chat"
-                    title="Hide chat"
-                  >
-                    <Minimize2 size={14} />
-                  </button>
-                </div>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setChatCollapsed((prev) => !prev)}
+                  aria-expanded={!chatCollapsed}
+                  aria-label={chatCollapsed ? 'Expand break chat' : 'Collapse break chat'}
+                  title={
+                    chatCollapsed
+                      ? 'Expand break chat (visual only, messages stay saved)'
+                      : 'Collapse break chat (visual only, messages stay saved)'
+                  }
+                  className="rounded-md p-1.5 text-text-secondary transition-colors hover:bg-surface-overlay hover:text-text"
+                >
+                  {chatCollapsed ? <ChevronDown size={14} /> : <ChevronUp size={14} />}
+                </button>
               </div>
+            </div>
 
+            {chatCollapsed ? (
+              <p className="px-4 py-3 text-xs text-text-muted">
+                Chat collapsed — expand to read and send messages.
+              </p>
+            ) : (
+              <>
               {confirmingDelete && (
                 <div className="border-b border-border-subtle bg-surface-overlay px-4 py-3">
                   <p className="text-xs text-text-secondary">
@@ -580,12 +595,37 @@ export default function SessionRoomPage() {
                 </div>
               )}
 
-              <div className="flex-1 space-y-3 overflow-y-auto p-4">
+              <div ref={chatScrollRef} className="h-64 min-h-0 shrink-0 space-y-3 overflow-y-auto p-4">
+                {showPreviousBreaks ? (
+                  <button
+                    type="button"
+                    onClick={() => setShowPreviousBreaks(false)}
+                    className="flex items-center gap-1.5 rounded-lg border border-border bg-surface-overlay px-3 py-1.5 text-xs font-medium text-text-secondary transition-colors hover:bg-surface-raised hover:text-text"
+                  >
+                    <History size={12} />
+                    Showing full session history — show this break only
+                  </button>
+                ) : (
+                  allMessages.length > messages.length && (
+                    <button
+                      type="button"
+                      onClick={() => setShowPreviousBreaks(true)}
+                      className="flex items-center gap-1.5 rounded-lg border border-border bg-surface-overlay px-3 py-1.5 text-xs font-medium text-text-secondary transition-colors hover:bg-surface-raised hover:text-text"
+                      title="Earlier breaks are kept on the server — this only changes what you see"
+                    >
+                      <History size={12} />
+                      Show previous breaks ({allMessages.length - messages.length} earlier{' '}
+                      {allMessages.length - messages.length === 1 ? 'message' : 'messages'})
+                    </button>
+                  )
+                )}
                 {messages.length === 0 ? (
                   <p className="text-center text-xs text-text-muted">
                     {!chatEnabled
                       ? 'Chat locked during focus time'
-                      : 'Say hi before the session starts or during breaks'}
+                      : allMessages.length > messages.length && !showPreviousBreaks
+                        ? 'New break — starting fresh. Earlier breaks are still saved.'
+                        : 'Say hi before the session starts or during breaks'}
                   </p>
                 ) : (
                   messages.map((m) => (
@@ -630,8 +670,9 @@ export default function SessionRoomPage() {
                   </Button>
                 </div>
               </form>
+              </>
+            )}
             </section>
-          )}
         </div>
       </div>
 
