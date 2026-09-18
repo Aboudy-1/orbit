@@ -12,14 +12,19 @@ type SettingsModalProps = {
   breakDuration: number
   timerSound: TimerSound
   timerVolume: number
+  alarmRepeatCount: number
   hasCustomSound: boolean
   customRingtoneUrl?: string | null
+  /** Session-level setting — only passed from the session room for the host. */
+  allowAllControl?: boolean
+  onToggleAllowAllControl?: () => void
   onToggleAutoStartBreaks: () => void
   onToggleAutoStartFocus: () => void
   onFocusDurationChange: (minutes: number) => void
   onBreakDurationChange: (minutes: number) => void
   onTimerSoundChange: (sound: TimerSound) => void
   onTimerVolumeChange: (volume: number) => void
+  onAlarmRepeatCountChange: (count: number) => void
   onCustomSoundUpload?: (file: File) => void
   onRemoveCustomSound?: () => void
 }
@@ -104,6 +109,7 @@ function StepperInput({
 }
 
 const SOUND_OPTIONS: TimerSound[] = ['bell', 'chime', 'digital', 'gentle', 'none']
+const ALARM_REPEAT_OPTIONS = [1, 2, 3, 4, 5]
 
 export default function SettingsModal({
   open,
@@ -114,14 +120,18 @@ export default function SettingsModal({
   breakDuration,
   timerSound,
   timerVolume,
+  alarmRepeatCount,
   hasCustomSound,
   customRingtoneUrl,
+  allowAllControl,
+  onToggleAllowAllControl,
   onToggleAutoStartBreaks,
   onToggleAutoStartFocus,
   onFocusDurationChange,
   onBreakDurationChange,
   onTimerSoundChange,
   onTimerVolumeChange,
+  onAlarmRepeatCountChange,
   onCustomSoundUpload,
   onRemoveCustomSound,
 }: SettingsModalProps) {
@@ -255,6 +265,23 @@ export default function SettingsModal({
             <ToggleSwitch enabled={autoStartFocus} onChange={onToggleAutoStartFocus} />
           </div>
 
+          {onToggleAllowAllControl && (
+            <div className="flex items-center justify-between rounded-lg border border-border-subtle px-4 py-3">
+              <div>
+                <p className="text-sm font-medium text-text">
+                  Allow all participants to control the session
+                </p>
+                <p className="text-xs text-text-muted">
+                  Everyone can pause, resume, skip and start the timer — not just the host
+                </p>
+              </div>
+              <ToggleSwitch
+                enabled={!!allowAllControl}
+                onChange={onToggleAllowAllControl}
+              />
+            </div>
+          )}
+
           <div className="h-px bg-border-subtle" />
 
           {/* Timer Sound Section */}
@@ -374,6 +401,28 @@ export default function SettingsModal({
               onChange={(e) => onTimerVolumeChange(parseInt(e.target.value, 10))}
               className="mt-2 h-2 w-full cursor-pointer appearance-none rounded-full bg-border-subtle accent-accent"
             />
+          </div>
+
+          {/* Repeat alarm */}
+          <div className="flex items-center justify-between rounded-lg border border-border-subtle px-4 py-3">
+            <div>
+              <p className="text-sm font-medium text-text">Repeat alarm</p>
+              <p className="text-xs text-text-muted">
+                Play the alert this many times when a timer ends, until dismissed
+              </p>
+            </div>
+            <select
+              value={alarmRepeatCount}
+              onChange={(e) => onAlarmRepeatCountChange(Number(e.target.value))}
+              aria-label="Repeat alarm times"
+              className="rounded-lg border border-border bg-surface-raised px-2 py-1.5 text-sm font-medium tabular-nums text-text"
+            >
+              {ALARM_REPEAT_OPTIONS.map((times) => (
+                <option key={times} value={times}>
+                  {times}×
+                </option>
+              ))}
+            </select>
           </div>
         </div>
       </div>

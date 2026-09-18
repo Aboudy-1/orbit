@@ -74,6 +74,7 @@ export default function AppShell({ children, maxWidth = '2xl' }: AppShellProps) 
         breakDuration={timerSettings.breakDuration}
         timerSound={timerSettings.timerSound}
         timerVolume={timerSettings.timerVolume}
+        alarmRepeatCount={timerSettings.alarmRepeatCount}
         hasCustomSound={!!timerSettings.customSoundUrl}
         customRingtoneUrl={timerSettings.customSoundUrl}
         onToggleAutoStartBreaks={timerSettings.handleToggleAutoStartBreaks}
@@ -82,6 +83,7 @@ export default function AppShell({ children, maxWidth = '2xl' }: AppShellProps) 
         onBreakDurationChange={timerSettings.handleBreakDurationChange}
         onTimerSoundChange={timerSettings.handleTimerSoundChange}
         onTimerVolumeChange={timerSettings.handleTimerVolumeChange}
+        onAlarmRepeatCountChange={timerSettings.handleAlarmRepeatCountChange}
         onCustomSoundUpload={timerSettings.handleCustomSoundUpload}
         onRemoveCustomSound={timerSettings.handleRemoveCustomSound}
       />

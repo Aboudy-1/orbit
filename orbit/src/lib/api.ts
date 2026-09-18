@@ -29,11 +29,57 @@ export async function setProfileStatus(userId: string, status: Profile['status']
 }
 
 export async function setAutoStartBreaks(userId: string, enabled: boolean) {
-  return supabase.from('profiles').update({ auto_start_breaks: enabled }).eq('id', userId)
+  // NOTE: `.select().single()` is load-bearing here, not just convenient.
+  // Without it PostgREST returns success with zero rows affected when RLS
+  // blocks the UPDATE (or the id filter matches nothing) — no `error`, so
+  // the optimistic toggle would stick locally then silently revert on the
+  // next profile refetch. With `.select().single()`, a 0-row update comes
+  // back as `data: null` + an error ("JSON object requested, multiple (or
+  // no) rows returned"), which the caller treats as failure and rolls back
+  // immediately instead of diverging from the DB.
+  const { data, error } = await supabase
+    .from('profiles')
+    .update({ auto_start_breaks: enabled })
+    .eq('id', userId)
+    .select()
+    .single()
+
+  if (error) {
+    console.error('[setAutoStartBreaks] Supabase update failed:', error.message, error, { userId, enabled, data })
+  } else if (!data) {
+    console.error('[setAutoStartBreaks] 0 rows updated (RLS block or no matching id?)', { userId, enabled })
+  } else {
+    console.info('[setAutoStartBreaks] persisted:', data)
+  }
+  const noRowError =
+    !error && !data
+      ? { message: '0 rows updated — RLS blocked the write or no profile matched this id' }
+      : null
+  return { data, error: error ?? noRowError }
 }
 
 export async function setAutoStartFocus(userId: string, enabled: boolean) {
-  return supabase.from('profiles').update({ auto_start_focus: enabled }).eq('id', userId)
+  // See note above: `.select().single()` turns a silent 0-row RLS no-op
+  // into a visible error so the toggle rolls back instead of diverging.
+  const { data, error } = await supabase
+    .from('profiles')
+    .update({ auto_start_focus: enabled })
+    .eq('id', userId)
+    .select()
+    .single()
+
+  if (error) {
+    console.error('[setAutoStartFocus] Supabase update failed:', error.message, error, { userId, enabled, data })
+  } else if (!data) {
+    console.error('[setAutoStartFocus] 0 rows updated (RLS block or no matching id?)', { userId, enabled })
+  } else {
+    console.info('[setAutoStartFocus] persisted:', data)
+  }
+  const noRowError =
+    !error && !data
+      ? { message: '0 rows updated — RLS blocked the write or no profile matched this id' }
+      : null
+  return { data, error: error ?? noRowError }
 }
 
 export async function setFocusDuration(userId: string, minutes: number) {
@@ -58,6 +104,17 @@ export async function setTimerVolume(userId: string, volume: number) {
   const clamped = Math.max(0, Math.min(100, volume))
   const { error } = await supabase.from('profiles').update({ timer_volume: clamped }).eq('id', userId)
   if (error) console.error('[setTimerVolume] Supabase update failed:', error.message, error)
+  return { error }
+}
+
+/** How many times the alarm sounds when a timer ends (1–5). */
+export async function setAlarmRepeatCount(userId: string, count: number) {
+  const clamped = Math.max(1, Math.min(5, Math.round(count)))
+  const { error } = await supabase
+    .from('profiles')
+    .update({ alarm_repeat_count: clamped })
+    .eq('id', userId)
+  if (error) console.error('[setAlarmRepeatCount] Supabase update failed:', error.message, error)
   return { error }
 }
 
@@ -360,6 +417,17 @@ export async function leaveFocusSession(sessionId: string, userId: string) {
 }
 
 export async function pauseSession(sessionId: string) {
+  // Prefer the RPC so participants allowed to control the session can pause too
+  // (the direct table update below is host-only under RLS).
+  const { data: rpcData, error: rpcError } = await supabase.rpc('pause_focus_session', {
+    p_session_id: sessionId,
+  })
+
+  if (!rpcError && rpcData) {
+    const row = Array.isArray(rpcData) ? rpcData[0] : rpcData
+    if (row) return { data: row as FocusSession, error: null }
+  }
+
   const now = new Date().toISOString()
   const { data, error } = await supabase
     .from('focus_sessions')
@@ -373,6 +441,17 @@ export async function pauseSession(sessionId: string) {
 }
 
 export async function resumeSession(sessionId: string) {
+  // Prefer the RPC (handles the paused time offset on the server) so allowed
+  // participants can resume; fall back to the host-only table update.
+  const { data: rpcData, error: rpcError } = await supabase.rpc('resume_focus_session', {
+    p_session_id: sessionId,
+  })
+
+  if (!rpcError && rpcData) {
+    const row = Array.isArray(rpcData) ? rpcData[0] : rpcData
+    if (row) return { data: row as FocusSession, error: null }
+  }
+
   const { data: session, error: fetchError } = await supabase
     .from('focus_sessions')
     .select('id, phase_ends_at, paused_at')
@@ -425,6 +504,23 @@ export async function syncSessionDurations(
       break_duration_sec: breakDurationSec,
     })
     .eq('id', sessionId)
+}
+
+/** Host-only: let every participant pause/resume/skip/start the session. */
+export async function setSessionAllowAllControl(sessionId: string, allow: boolean) {
+  const { data, error } = await supabase
+    .from('focus_sessions')
+    .update({ allow_all_control: allow })
+    .eq('id', sessionId)
+    .select()
+    .single()
+
+  if (error) {
+    console.error('[setSessionAllowAllControl] Supabase update failed:', error.message, error)
+    return { data: null, error }
+  }
+
+  return { data: data as FocusSession, error: null }
 }
 
 export async function startSessionTimer(sessionId: string, focusDurationSec: number) {
@@ -538,17 +634,53 @@ async function enrichMessagesWithProfiles(messages: DirectMessage[]): Promise<Di
 }
 
 export async function fetchDirectMessages(userId: string, otherId: string) {
-  const { data, error } = await supabase
+  // Per-user hide watermark (only this user's own row is ever read/written).
+  const { data: hide, error: hideError } = await supabase
+    .from('direct_message_hides')
+    .select('hidden_at')
+    .eq('user_id', userId)
+    .eq('other_user_id', otherId)
+    .maybeSingle()
+
+  if (hideError) {
+    console.warn('[fetchDirectMessages] could not read hide watermark:', hideError.message)
+  }
+  const hiddenAt = (hide?.hidden_at as string | undefined) ?? null
+
+  const base = supabase
     .from('direct_messages')
     .select('*')
     .or(`and(sender_id.eq.${userId},receiver_id.eq.${otherId}),and(sender_id.eq.${otherId},receiver_id.eq.${userId})`)
-    .order('created_at', { ascending: true })
-    .limit(200)
 
-  if (error) return { data: [] as DirectMessage[], error }
+  const filtered = hiddenAt ? base.gt('created_at', hiddenAt) : base
+  const { data, error } = await filtered.order('created_at', { ascending: true }).limit(200)
+
+  if (error) return { data: [] as DirectMessage[], error, hiddenAt }
 
   const enriched = await enrichMessagesWithProfiles(data as DirectMessage[])
-  return { data: enriched, error: null }
+  return { data: enriched, error: null, hiddenAt }
+}
+
+/**
+ * Hide a direct-message conversation for this user only (nothing is deleted).
+ * The friend keeps their copy; messages sent after this call become visible
+ * again for the user who deleted it.
+ */
+export async function hideDirectConversation(userId: string, otherId: string) {
+  const hiddenAt = new Date().toISOString()
+  const { error } = await supabase
+    .from('direct_message_hides')
+    .upsert(
+      { user_id: userId, other_user_id: otherId, hidden_at: hiddenAt },
+      { onConflict: 'user_id,other_user_id' },
+    )
+
+  if (error) {
+    console.error('[hideDirectConversation] Supabase upsert failed:', error.message, error)
+    return { hiddenAt: null, error }
+  }
+
+  return { hiddenAt, error: null }
 }
 
 export async function sendDirectMessage(senderId: string, receiverId: string, content: string) {
@@ -591,12 +723,33 @@ export async function markDirectMessagesRead(userId: string, otherId: string) {
 export async function countUnreadMessages(userId: string) {
   const { data, error } = await supabase
     .from('direct_messages')
-    .select('sender_id')
+    .select('sender_id, created_at')
     .eq('receiver_id', userId)
     .is('read_at', null)
 
   if (error) return { counts: [] as { sender_id: string }[], error }
-  return { counts: data as { sender_id: string }[], error: null }
+
+  // Messages inside conversations the user has deleted/hidden are not shown
+  // anywhere, so they should not drive the unread badge either.
+  const { data: hides, error: hideError } = await supabase
+    .from('direct_message_hides')
+    .select('other_user_id, hidden_at')
+    .eq('user_id', userId)
+
+  if (hideError) {
+    console.warn('[countUnreadMessages] could not read hide watermarks:', hideError.message)
+  }
+
+  const hiddenUntil = new Map(
+    (hides ?? []).map((h) => [h.other_user_id as string, h.hidden_at as string]),
+  )
+
+  const counts = ((data ?? []) as { sender_id: string; created_at: string }[]).filter((row) => {
+    const hiddenAt = hiddenUntil.get(row.sender_id)
+    return !hiddenAt || Date.parse(row.created_at) > Date.parse(hiddenAt)
+  })
+
+  return { counts, error: null }
 }
 
 export async function fetchSessionMessages(sessionId: string) {
@@ -608,6 +761,71 @@ export async function fetchSessionMessages(sessionId: string) {
     .limit(100)
 
   return { data: (data ?? []) as SessionMessage[], error }
+}
+
+/** Watermark of the last "clear chat for me" for this participant. */
+export async function fetchSessionChatClearedAt(sessionId: string, userId: string) {
+  const { data, error } = await supabase
+    .from('session_participants')
+    .select('cleared_at')
+    .eq('session_id', sessionId)
+    .eq('user_id', userId)
+    .maybeSingle()
+
+  if (error) {
+    console.warn('[fetchSessionChatClearedAt] could not read watermark:', error.message)
+    return { clearedAt: null, error }
+  }
+
+  return { clearedAt: (data?.cleared_at as string | null) ?? null, error: null }
+}
+
+/**
+ * Hide every session message older than now for this user only. Other
+ * participants keep the full history; nothing is deleted from the database.
+ */
+export async function clearSessionChatForUser(sessionId: string, userId: string) {
+  const clearedAt = new Date().toISOString()
+  const { error } = await supabase
+    .from('session_participants')
+    .upsert(
+      { session_id: sessionId, user_id: userId, cleared_at: clearedAt },
+      { onConflict: 'session_id,user_id' },
+    )
+
+  if (error) {
+    console.error('[clearSessionChatForUser] Supabase upsert failed:', error.message, error)
+    return { clearedAt: null, error }
+  }
+
+  return { clearedAt, error: null }
+}
+
+/**
+ * Permanently delete every message in a session for EVERYONE.
+ * Unlike clearSessionChatForUser (per-user watermark), rows are removed from
+ * Supabase so they never reappear on refresh or for other participants.
+ * Permission (host, or allowed participants) is enforced server-side.
+ */
+export async function deleteSessionChat(sessionId: string) {
+  const { error: rpcError } = await supabase.rpc('delete_session_chat', {
+    p_session_id: sessionId,
+  })
+
+  if (!rpcError) return { error: null }
+
+  // Fall back to a direct delete (works for the host under the RLS policy)
+  const { error } = await supabase
+    .from('session_messages')
+    .delete()
+    .eq('session_id', sessionId)
+
+  if (error) {
+    console.error('[deleteSessionChat] Supabase delete failed:', error.message, error)
+    return { error: rpcError }
+  }
+
+  return { error: null }
 }
 
 export async function sendSessionMessage(sessionId: string, userId: string, content: string) {

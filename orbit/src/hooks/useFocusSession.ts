@@ -1,13 +1,17 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   advanceSessionPhase,
+  clearSessionChatForUser,
+  deleteSessionChat,
   endFocusSession,
+  fetchSessionChatClearedAt,
   fetchSessionMessages,
   joinFocusSession,
   leaveFocusSession,
   pauseSession,
   resumeSession,
   sendSessionMessage,
+  setSessionAllowAllControl,
   startSessionTimer,
   syncFocusSessionPhase,
   syncSessionDurations,
@@ -27,6 +31,12 @@ export function useFocusSession(
   const [session, setSession] = useState<FocusSession | null>(null)
   const [participants, setParticipants] = useState<SessionParticipant[]>([])
   const [messages, setMessages] = useState<SessionMessage[]>([])
+  /**
+   * Per-user "clear chat for me" watermark. Messages at/below it are hidden from
+   * this user's view only — nothing is deleted, other participants keep the
+   * full history.
+   */
+  const [clearedAt, setClearedAt] = useState<string | null>(null)
   const [profileMap, setProfileMap] = useState<Record<string, Profile>>({})
   const [remainingSec, setRemainingSec] = useState(0)
   const [loading, setLoading] = useState(true)
@@ -90,10 +100,16 @@ export function useFocusSession(
     syncedDeadlineRef.current = null
     await loadParticipants(sessionId)
 
+    // Per-user chat watermark, so a previously cleared chat stays cleared
+    if (userId) {
+      const { clearedAt: storedClearedAt } = await fetchSessionChatClearedAt(sessionId, userId)
+      setClearedAt(storedClearedAt)
+    }
+
     const { data: msgs } = await fetchSessionMessages(sessionId)
     setMessages(msgs)
     setLoading(false)
-  }, [sessionId, loadParticipants])
+  }, [sessionId, userId, loadParticipants])
 
   useEffect(() => {
     loadSession()
@@ -159,13 +175,23 @@ export function useFocusSession(
       .on(
         'postgres_changes',
         {
-          event: 'INSERT',
+          event: '*',
           schema: 'public',
           table: 'session_messages',
           filter: `session_id=eq.${sessionId}`,
         },
         (payload) => {
-          console.log('[useFocusSession] new message received:', payload)
+          if (payload.eventType === 'DELETE') {
+            const oldRow = payload.old as Partial<SessionMessage> | undefined
+            if (oldRow?.id) {
+              setMessages((prev) => prev.filter((m) => m.id !== oldRow.id))
+            } else {
+              // Unknown row deleted (e.g. whole chat) — drop everything and let
+              // the next reload repopulate if anything remains.
+              setMessages([])
+            }
+            return
+          }
           const msg = payload.new as SessionMessage
           setMessages((prev) => (prev.some((m) => m.id === msg.id) ? prev : [...prev, msg]))
         },
@@ -197,6 +223,23 @@ export function useFocusSession(
   }, [session])
 
   const isHost = !!(session && userId && session.host_id === userId)
+  const allowAllControl = !!session?.allow_all_control
+  /** Host, or any participant once the host allowed everyone to control the session. */
+  const canControl = !!(session && userId && (session.host_id === userId || session.allow_all_control))
+
+  const setAllowAllControl = useCallback(
+    async (allow: boolean) => {
+      if (!sessionId || !session || session.host_id !== userId) return
+      setActionError(null)
+      const { data, error: err } = await setSessionAllowAllControl(sessionId, allow)
+      if (err) {
+        setActionError(err.message)
+        return
+      }
+      if (data) setSession(data)
+    },
+    [sessionId, userId, session],
+  )
 
   const runHostSync = useCallback(async () => {
     if (!sessionId || !session?.phase_ends_at || syncingRef.current) return
@@ -276,7 +319,7 @@ export function useFocusSession(
   }, [session, isHost, remainingSec, runHostSync, autoStartBreaks, autoStartFocus, sessionId, focusDurationSec, breakDurationSec])
 
   const start = useCallback(async () => {
-    if (!sessionId || !userId || !session || session.host_id !== userId) return
+    if (!sessionId || !userId || !session || !canControl) return
     setStarting(true)
     setActionError(null)
     syncedDeadlineRef.current = null
@@ -301,10 +344,10 @@ export function useFocusSession(
     } else {
       await loadSession()
     }
-  }, [sessionId, userId, session, loadSession, focusDurationSec, breakDurationSec])
+  }, [sessionId, userId, session, loadSession, focusDurationSec, breakDurationSec, canControl])
 
   const end = useCallback(async () => {
-    if (!sessionId || !userId || !session || session.host_id !== userId) return
+    if (!sessionId || !userId || !session || !canControl) return
     setActionError(null)
     syncedDeadlineRef.current = null
     const { data, error: err } = await endFocusSession(sessionId)
@@ -313,10 +356,10 @@ export function useFocusSession(
       setSession(data)
       setRemainingSec(0)
     }
-  }, [sessionId, userId, session])
+  }, [sessionId, userId, session, canControl])
 
   const startBreak = useCallback(async () => {
-    if (!sessionId || !userId || !session || session.host_id !== userId) return
+    if (!sessionId || !userId || !session || !canControl) return
     if (session.phase !== 'focus') return
     setActionError(null)
     syncedDeadlineRef.current = null
@@ -340,7 +383,7 @@ export function useFocusSession(
     } else {
       await loadSession()
     }
-  }, [sessionId, userId, session, loadSession, focusDurationSec, breakDurationSec])
+  }, [sessionId, userId, session, loadSession, focusDurationSec, breakDurationSec, canControl])
 
   const pause = useCallback(async () => {
     if (!sessionId || !userId || !session) return
@@ -381,6 +424,32 @@ export function useFocusSession(
     await leaveFocusSession(sessionId, userId)
   }, [sessionId, userId])
 
+  const clearChat = useCallback(async () => {
+    if (!sessionId || !userId) return
+    setActionError(null)
+
+    const { clearedAt: newWatermark, error: err } = await clearSessionChatForUser(sessionId, userId)
+    if (err || !newWatermark) {
+      setActionError(err?.message ?? 'Could not clear the chat')
+      return
+    }
+
+    setClearedAt(newWatermark)
+  }, [sessionId, userId])
+
+  const deleteChat = useCallback(async () => {
+    if (!sessionId || !userId) return
+    setActionError(null)
+
+    const { error: err } = await deleteSessionChat(sessionId)
+    if (err) {
+      setActionError(err.message)
+      return
+    }
+
+    setMessages([])
+  }, [sessionId, userId])
+
   const sendMessage = useCallback(
     async (content: string) => {
       if (!sessionId || !userId) {
@@ -404,10 +473,21 @@ export function useFocusSession(
     [sessionId, userId, session?.phase, session?.is_active],
   )
 
+  /**
+   * Messages visible to this user, i.e. everything newer than their own
+   * "clear chat for me" watermark.
+   */
+  const visibleMessages = useMemo(() => {
+    if (!clearedAt) return messages
+    const watermark = Date.parse(clearedAt)
+    if (Number.isNaN(watermark)) return messages
+    return messages.filter((m) => Date.parse(m.created_at) > watermark)
+  }, [messages, clearedAt])
+
   return {
     session,
     participants,
-    messages,
+    messages: visibleMessages,
     profileMap,
     remainingSec,
     loading,
@@ -415,6 +495,11 @@ export function useFocusSession(
     actionError,
     starting,
     isHost,
+    allowAllControl,
+    canControl,
+    setAllowAllControl,
+    clearChat,
+    deleteChat,
     start,
     startBreak,
     end,

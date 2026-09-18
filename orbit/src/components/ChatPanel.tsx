@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react'
-import { Maximize2, Minimize2, Send, X } from 'lucide-react'
+import { Maximize2, Minimize2, Send, Trash2, X } from 'lucide-react'
 import { supabase } from '../lib/supabase'
 import {
   fetchDirectMessages,
+  hideDirectConversation,
   markDirectMessagesRead,
   sendDirectMessage,
 } from '../lib/api'
@@ -20,8 +21,25 @@ export default function ChatPanel({ userId, friend, onClose }: ChatPanelProps) {
   const [sending, setSending] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [fullscreen, setFullscreen] = useState(false)
+  const [confirmingDelete, setConfirmingDelete] = useState(false)
+  const [deleting, setDeleting] = useState(false)
   const chatEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
+  /**
+   * "Delete conversation" is per-user: this watermark hides every message older
+   * than it for this user only (the friend keeps their copy). Kept in a ref so
+   * the realtime listener can ignore late-arriving hidden messages.
+   */
+  const hiddenAtRef = useRef<string | null>(null)
+
+  // Keep the caret in the message box so several messages can be sent in a row.
+  // The Send button becomes disabled once the input is cleared, which makes the
+  // browser drop focus — so re-focus explicitly (twice for mobile Safari, which
+  // restores focus asynchronously after the tap).
+  function refocusInput() {
+    inputRef.current?.focus()
+    requestAnimationFrame(() => inputRef.current?.focus())
+  }
 
   // Mark messages as read when panel opens
   useEffect(() => {
@@ -34,10 +52,11 @@ export default function ChatPanel({ userId, friend, onClose }: ChatPanelProps) {
     ))
   }, [userId, friend.id])
 
-  // Load conversation history
+  // Load conversation history (anything at/below the delete watermark is hidden)
   useEffect(() => {
     async function load() {
-      const { data } = await fetchDirectMessages(userId, friend.id)
+      const { data, hiddenAt } = await fetchDirectMessages(userId, friend.id)
+      hiddenAtRef.current = hiddenAt ?? null
       if (data) setMessages(data)
     }
     load()
@@ -60,6 +79,9 @@ export default function ChatPanel({ userId, friend, onClose }: ChatPanelProps) {
           const msg = payload.new as DirectMessage
           // Only add if it's from the friend we're chatting with
           if (msg.sender_id === friend.id && msg.receiver_id === userId) {
+            // Ignore messages that this user has deleted (older than the watermark)
+            const hiddenAt = hiddenAtRef.current
+            if (hiddenAt && Date.parse(msg.created_at) <= Date.parse(hiddenAt)) return
             // Add the new message
             setMessages((prev) => (prev.some((m) => m.id === msg.id) ? prev : [...prev, msg]))
             // Optimistically mark as read and update database
@@ -130,6 +152,7 @@ export default function ChatPanel({ userId, friend, onClose }: ChatPanelProps) {
       setError(err.message)
       // Remove the optimistic message on failure
       setMessages((prev) => prev.filter((m) => m.id !== tempId))
+      refocusInput()
       return
     }
 
@@ -137,6 +160,31 @@ export default function ChatPanel({ userId, friend, onClose }: ChatPanelProps) {
       // Replace optimistic message with real one
       setMessages((prev) => prev.map((m) => (m.id === tempId ? data : m)))
     }
+
+    refocusInput()
+  }
+
+  /**
+   * "Delete conversation" — hides the thread for this user only. Nothing is
+   * removed from Supabase, so the friend's copy stays intact, and any message
+   * exchanged afterwards makes the conversation visible again.
+   */
+  async function handleDeleteConversation() {
+    if (deleting) return
+    setDeleting(true)
+    setError(null)
+
+    const { hiddenAt, error: err } = await hideDirectConversation(userId, friend.id)
+    setDeleting(false)
+
+    if (err || !hiddenAt) {
+      setError(err?.message ?? 'Could not delete the conversation')
+      return
+    }
+
+    hiddenAtRef.current = hiddenAt
+    setMessages([])
+    setConfirmingDelete(false)
   }
 
   const panelClass = fullscreen
@@ -158,6 +206,17 @@ export default function ChatPanel({ userId, friend, onClose }: ChatPanelProps) {
         <div className="flex items-center gap-1">
           <button
             type="button"
+            onClick={() => setConfirmingDelete((prev) => !prev)}
+            className={`rounded-lg p-2 transition-colors hover:bg-surface-overlay ${
+              confirmingDelete ? 'text-danger' : 'text-text-secondary hover:text-text'
+            }`}
+            aria-label="Delete conversation"
+            title="Delete conversation (only for you)"
+          >
+            <Trash2 size={16} />
+          </button>
+          <button
+            type="button"
             onClick={() => setFullscreen(!fullscreen)}
             className="rounded-lg p-2 text-text-secondary transition-colors hover:bg-surface-overlay hover:text-text"
             aria-label={fullscreen ? 'Collapse chat' : 'Expand chat'}
@@ -175,11 +234,41 @@ export default function ChatPanel({ userId, friend, onClose }: ChatPanelProps) {
         </div>
       </div>
 
+      {/* Delete confirmation — irreversible from this user's point of view */}
+      {confirmingDelete && (
+        <div className="border-b border-border-subtle bg-surface-overlay px-4 py-3">
+          <p className="text-xs text-text-secondary">
+            Delete this conversation from your side? @{friend.username} keeps their copy of the
+            messages, and new messages will appear here again.
+          </p>
+          <div className="mt-3 flex gap-2">
+            <button
+              type="button"
+              onClick={() => void handleDeleteConversation()}
+              disabled={deleting}
+              className="rounded-lg bg-danger px-3 py-1.5 text-xs font-medium text-white transition-colors hover:opacity-90 disabled:opacity-50"
+            >
+              {deleting ? 'Deleting…' : 'Delete for me'}
+            </button>
+            <button
+              type="button"
+              onClick={() => setConfirmingDelete(false)}
+              disabled={deleting}
+              className="rounded-lg border border-border px-3 py-1.5 text-xs font-medium text-text-secondary transition-colors hover:bg-surface-raised hover:text-text disabled:opacity-50"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Messages */}
       <div className="flex-1 overflow-y-auto p-4">
         {messages.length === 0 ? (
           <p className="mt-8 text-center text-sm text-text-muted">
-            No messages yet. Say hello!
+            {hiddenAtRef.current
+              ? 'Conversation deleted. Send a message to start a new one.'
+              : 'No messages yet. Say hello!'}
           </p>
         ) : (
           <div className="space-y-3">
@@ -241,6 +330,8 @@ export default function ChatPanel({ userId, friend, onClose }: ChatPanelProps) {
           <button
             type="submit"
             disabled={!input.trim() || sending}
+            // Prevent the button from taking focus away from the message box
+            onMouseDown={(e) => e.preventDefault()}
             className="flex items-center justify-center rounded-lg bg-accent px-3 py-2 text-white transition-colors hover:bg-accent-hover disabled:opacity-50"
           >
             <Send size={16} />

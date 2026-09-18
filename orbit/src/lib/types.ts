@@ -38,6 +38,7 @@ export type Profile = {
   break_duration: number
   timer_sound: TimerSound
   timer_volume: number
+  alarm_repeat_count: number
   created_at: string
   updated_at: string
 }
@@ -54,6 +55,7 @@ export type FocusSession = {
   is_active: boolean
   is_paused: boolean
   paused_at: string | null
+  allow_all_control: boolean
   created_at: string
 }
 

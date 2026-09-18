@@ -6,15 +6,130 @@ import type { TimerSound } from './types'
  */
 
 let audioCtx: AudioContext | null = null
+let audioUnlocked = false
+let unlockListenersInstalled = false
+let pendingPlay: (() => void) | null = null
+
+type AudioContextConstructor = typeof AudioContext
+
+function getAudioContextConstructor(): AudioContextConstructor | null {
+  if (typeof window === 'undefined') return null
+  const globalWithWebkit = globalThis as typeof globalThis & {
+    webkitAudioContext?: AudioContextConstructor
+  }
+  return globalWithWebkit.AudioContext ?? globalWithWebkit.webkitAudioContext ?? null
+}
 
 function getAudioContext(): AudioContext {
-  if (!audioCtx) {
-    audioCtx = new AudioContext()
-  }
-  if (audioCtx.state === 'suspended') {
-    audioCtx.resume()
-  }
+  if (audioCtx) return audioCtx
+
+  const Ctor = getAudioContextConstructor()
+  if (!Ctor) throw new Error('Web Audio API is not supported in this browser')
+
+  audioCtx = new Ctor()
   return audioCtx
+}
+
+/** Plays a 1-sample silent buffer — helps some mobile browsers mark the context usable. */
+function primeAudioContext(ctx: AudioContext) {
+  try {
+    const buffer = ctx.createBuffer(1, 1, ctx.sampleRate)
+    const source = ctx.createBufferSource()
+    source.buffer = buffer
+    source.connect(ctx.destination)
+    source.start(0)
+  } catch {
+    // Priming is best-effort only
+  }
+}
+
+function flushPendingPlay() {
+  const play = pendingPlay
+  pendingPlay = null
+  play?.()
+}
+
+/**
+ * Resume the shared AudioContext from inside a user gesture.
+ * Mobile browsers (iOS Safari especially) create the context suspended and only
+ * allow `resume()` while a gesture is being handled, so alarm sounds are silent
+ * unless this runs on a tap/key press first.
+ */
+export function unlockTimerAudio() {
+  let ctx: AudioContext
+  try {
+    ctx = getAudioContext()
+  } catch (err) {
+    console.error('[timerSounds] Audio unavailable:', err)
+    return
+  }
+
+  primeAudioContext(ctx)
+
+  if (ctx.state === 'running') {
+    audioUnlocked = true
+    flushPendingPlay()
+    return
+  }
+
+  void ctx
+    .resume()
+    .then(() => {
+      if (ctx.state === 'running') {
+        audioUnlocked = true
+        flushPendingPlay()
+      }
+    })
+    .catch(() => {
+      // Still locked — the gesture listeners will retry
+    })
+}
+
+/**
+ * Attach one-time-ish listeners so the first tap / key press unlocks timer audio
+ * for the rest of the page's lifetime. Safe to call multiple times.
+ */
+export function installTimerAudioUnlock() {
+  if (typeof window === 'undefined' || unlockListenersInstalled) return
+  unlockListenersInstalled = true
+
+  const events: (keyof WindowEventMap)[] = ['pointerdown', 'touchend', 'mousedown', 'keydown']
+
+  const handler = () => {
+    unlockTimerAudio()
+    if (audioUnlocked) {
+      for (const event of events) window.removeEventListener(event, handler)
+    }
+  }
+
+  for (const event of events) {
+    window.addEventListener(event, handler, { passive: true })
+  }
+}
+
+export function isTimerAudioUnlocked(): boolean {
+  return audioUnlocked
+}
+
+function playNow(sound: TimerSound, volume: number) {
+  try {
+    switch (sound) {
+      case 'bell':
+        playBell(volume)
+        break
+      case 'chime':
+        playChime(volume)
+        break
+      case 'digital':
+        playDigital(volume)
+        break
+      case 'gentle':
+        playGentle(volume)
+        break
+    }
+  } catch (err) {
+    console.error('[timerSounds] Failed to play sound:', err)
+  }
 }
 
 function playBell(volume: number) {
@@ -112,24 +227,26 @@ function playGentle(volume: number) {
 export function playTimerSound(sound: TimerSound, volume: number) {
   if (sound === 'none' || sound === 'custom' || volume <= 0) return
 
+  let ctx: AudioContext
   try {
-    switch (sound) {
-      case 'bell':
-        playBell(volume)
-        break
-      case 'chime':
-        playChime(volume)
-        break
-      case 'digital':
-        playDigital(volume)
-        break
-      case 'gentle':
-        playGentle(volume)
-        break
-    }
+    ctx = getAudioContext()
   } catch (err) {
     console.error('[timerSounds] Failed to play sound:', err)
+    return
   }
+
+  if (ctx.state === 'running') {
+    audioUnlocked = true
+    playNow(sound, volume)
+    return
+  }
+
+  // Context is still suspended (mobile browsers block audio until a gesture).
+  // Queue the alarm and play it as soon as the context can be resumed instead of
+  // dropping it silently.
+  pendingPlay = () => playNow(sound, volume)
+  installTimerAudioUnlock()
+  unlockTimerAudio()
 }
 
 /**
